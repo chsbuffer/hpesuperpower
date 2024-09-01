@@ -4,6 +4,9 @@ using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Xml;
 
+using Mono.Cecil;
+using Mono.Cecil.Cil;
+
 using static DiskPartitionInfo.DiskPartitionInfo;
 using static Helper;
 
@@ -114,10 +117,12 @@ Restore all changes from backup:
 
         string aggregateImg = Path.Combine(installPath, @"emulator\avd\aggregate.img");
         string bios = Path.Combine(installPath, @"emulator\avd\bios.rom");
+        string serviceExe = Path.Combine(installPath, @"service\Service.exe");
         string serviceConfig = Path.Combine(installPath, @"service\Service.exe.config");
 
         string stockBios = Path.Combine(installPath, @"emulator\avd\bios.rom.bak");
         string stockBootImg = Path.Combine(installPath, @"emulator\avd\boot_a.img");
+        string stockServiceExe = Path.Combine(installPath, @"service\Service.exe.bak");
         string stockServiceConfig = Path.Combine(installPath, @"service\Service.exe.config.bak");
 
         if (arg.Restore)
@@ -130,6 +135,8 @@ Restore all changes from backup:
 
             Console.WriteLine("\n\n############# Restore bios.rom");
             File.Copy(stockBios, bios, true);
+            Console.WriteLine("\n\n############# Restore Service.exe");
+            File.Copy(stockServiceExe, serviceExe, true);
             Console.WriteLine("\n\n############# Restore Service.exe.config");
             File.Copy(stockServiceConfig, serviceConfig, true);
             Console.WriteLine("\n\n############# Restore stock boot");
@@ -154,6 +161,14 @@ Restore all changes from backup:
         Console.WriteLine("\n\n############# Patch Service.exe.config");
         PatchKernelCmdline(serviceConfig);
 
+        if (!File.Exists(stockServiceExe))
+        {
+            Console.WriteLine("\n\n############# Backup Service.exe");
+            File.Copy(serviceExe, stockServiceExe);
+        }
+        Console.WriteLine("\n\n############# Patch Service.exe");
+        PatchServiceExe(stockServiceExe, serviceExe);
+
         if (!File.Exists(stockBootImg))
             File.WriteAllBytes(stockBootImg, ExtractBoot(aggregateImg));
 
@@ -166,6 +181,35 @@ Restore all changes from backup:
         Console.WriteLine("\n\n############# Cleanup");
         Environment.CurrentDirectory = StartDirectory;
         Directory.Delete(TempDirName, true);
+    }
+
+    static void PatchServiceExe(string exePath, string outPath)
+    {
+        Environment.CurrentDirectory = Path.GetDirectoryName(exePath)!;
+        var assembly = AssemblyDefinition.ReadAssembly(exePath, new ReaderParameters { AssemblyResolver = new DefaultAssemblyResolver() });
+        var module = assembly.MainModule;
+
+        // System.Void Google.Hpe.Service.AppSession.AppSessionScope::HandleEmulatorSurfaceStateUpdate(Google.Hpe.Service.Emulator.Surface.EmulatorSurfaceState,Google.Hpe.Service.Emulator.Surface.EmulatorSurfaceState)
+        var AppSessionScope = module.GetType("Google.Hpe.Service.AppSession.AppSessionScope");
+        var method = AppSessionScope.Methods.Single(x => x.Name == "HandleEmulatorSurfaceStateUpdate");
+
+        Instruction? instruct = method.Body.Instructions.FirstOrDefault(p => p.Operand is FieldDefinition f && f.Name == "_transientForegroundPackages");
+
+        if (instruct == null)
+        {
+            Console.WriteLine("nothing to patch.");
+            return;
+        }
+
+        Console.WriteLine($"Patch Instruction at {method.Body.Instructions.IndexOf(instruct)}");
+
+        var processor = method.Body.GetILProcessor();
+        var newInstruction = processor.Create(OpCodes.Ret);
+
+        processor.Replace(instruct, newInstruction);
+
+        assembly.Write(outPath);
+        Environment.CurrentDirectory = StartDirectory;
     }
 
     static byte[] ExtractBoot(string diskPath)
