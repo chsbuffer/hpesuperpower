@@ -1,4 +1,5 @@
 ﻿using System.Collections.Immutable;
+using System.Diagnostics;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -144,6 +145,12 @@ Restore all changes from backup:
             return;
         }
 
+        if (Process.GetProcesses().Any(p => p.GetFileNameOrDefault() == serviceExe))
+        {
+            Console.WriteLine($"Please quit Google Play Games.");
+            return;
+        }
+
         if (!File.Exists(stockBios))
         {
             Console.WriteLine("\n\n############# Backup bios.rom");
@@ -186,30 +193,39 @@ Restore all changes from backup:
     static void PatchServiceExe(string exePath, string outPath)
     {
         Environment.CurrentDirectory = Path.GetDirectoryName(exePath)!;
-        var assembly = AssemblyDefinition.ReadAssembly(exePath, new ReaderParameters { AssemblyResolver = new DefaultAssemblyResolver() });
-        var module = assembly.MainModule;
-
-        // System.Void Google.Hpe.Service.AppSession.AppSessionScope::HandleEmulatorSurfaceStateUpdate(Google.Hpe.Service.Emulator.Surface.EmulatorSurfaceState,Google.Hpe.Service.Emulator.Surface.EmulatorSurfaceState)
-        var AppSessionScope = module.GetType("Google.Hpe.Service.AppSession.AppSessionScope");
-        var method = AppSessionScope.Methods.Single(x => x.Name == "HandleEmulatorSurfaceStateUpdate");
-
-        Instruction? instruct = method.Body.Instructions.FirstOrDefault(p => p.Operand is FieldDefinition f && f.Name == "_transientForegroundPackages");
-
-        if (instruct == null)
+        try
         {
-            Console.WriteLine("nothing to patch.");
-            return;
+
+            var assembly = AssemblyDefinition.ReadAssembly(exePath, new ReaderParameters { AssemblyResolver = new DefaultAssemblyResolver() });
+            var module = assembly.MainModule;
+
+            // System.Void Google.Hpe.Service.AppSession.AppSessionScope::HandleEmulatorSurfaceStateUpdate(Google.Hpe.Service.Emulator.Surface.EmulatorSurfaceState,Google.Hpe.Service.Emulator.Surface.EmulatorSurfaceState)
+            var AppSessionScope = module.GetType("Google.Hpe.Service.AppSession.AppSessionScope");
+            var method = AppSessionScope.Methods.Single(x => x.Name == "HandleEmulatorSurfaceStateUpdate");
+            var instructions = method.Body.Instructions;
+
+            var begin = instructions.FirstOrDefault(p => p.Operand is FieldDefinition f && f.Name == "_transientForegroundPackages");
+
+            if (begin == null)
+            {
+                Console.WriteLine("nothing to patch.");
+                return;
+            }
+
+            var idx = instructions.IndexOf(begin);
+            Console.WriteLine($"Patch Instruction at idx {idx}, offset IL_{begin.Offset:X4}");
+
+            while (instructions[idx].OpCode != OpCodes.Leave_S)
+            {
+                instructions.RemoveAt(idx);
+            }
+
+            assembly.Write(outPath);
         }
-
-        Console.WriteLine($"Patch Instruction at {method.Body.Instructions.IndexOf(instruct)}");
-
-        var processor = method.Body.GetILProcessor();
-        var newInstruction = processor.Create(OpCodes.Ret);
-
-        processor.Replace(instruct, newInstruction);
-
-        assembly.Write(outPath);
-        Environment.CurrentDirectory = StartDirectory;
+        finally
+        {
+            Environment.CurrentDirectory = StartDirectory;
+        }
     }
 
     static byte[] ExtractBoot(string diskPath)
